@@ -7,6 +7,7 @@
     "cheerio": "^0.17.0",
     "mongoose": "^3.8.18",
     "request": "^2.47.0",
-    "underscore": "^1.7.0"
+    "underscore": "^1.7.0",
+    "unzip": "^0.1.11"
   }
 }
