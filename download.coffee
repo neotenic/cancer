@@ -41,6 +41,7 @@ Packet = db.model 'Packet', new mongoose.Schema {
 	name:             String,
 	html:             String,
 	engine:           String,
+	error:            String,
 	tournament:       mongoose.Schema.ObjectId
 }
 
@@ -201,7 +202,6 @@ convert_cloud = (tempname, cb) ->
 		download: "inline"
 		outputformat: "html"
 		inputformat: libpath.extname(tempname).slice(1)
-		file: packet.href
 	convert options, tempname, cb
 
 convert_calibre = (tempname, cb) ->
@@ -211,8 +211,8 @@ convert_calibre = (tempname, cb) ->
 	proc.on 'close', (code, signal) ->
 		console.log 'process is finished', code, signal
 		fs.readFile outname + "/index.html", 'utf8', (err, html) ->
-			fs.unlink 
-			cb err, html
+			fs.rmrf outname, ->
+				cb err, html
 	proc.stdout.on 'data', (data) ->
 		console.log 'data', data.toString()
 	proc.stderr.on 'data', (data) ->
@@ -223,46 +223,80 @@ convert_unoconv = (tempname, cb) ->
 	unoconv.convert tempname, 'html', {
 		bin: 'unoconv/unoconv'
 	}, (err, data) ->
-		console.log 'converted!', data.toString()
-		cb null, data.toString()
+		return cb err if err
+		cb err, data.toString()
 
+convert_plaintext = (tempname, cb) ->
+	fs.readFile tempname, 'utf8', cb
 
 temp_counter = 0
 
-process_packet = ->
-	Packet.findOne { html: null, name: {$regex: /pdf/i} }, (err, packet) ->
-		console.log packet
-		ext = libpath.extname(packet.name)
-		if /^expand/.test(packet.href)
-			throw 'walp expansions'
-		tempname = "temp/input-#{temp_counter++}#{ext}"
-		done_conversion = (err, html) ->
-			# console.log html
-			packet.html = html
-			packet.save()
+process_packet = (packet, complete) ->
+	console.log packet
+	ext = libpath.extname(packet.name).toLowerCase()
+
+	tempname = "temp/input-#{temp_counter++}#{ext}"
+	
+	done_conversion = (err, html) ->
+		return complete err, html if err
+		packet.html = html
+		packet.save ->
 			console.log 'done conversion, saved and whatevs'
+			fs.unlink tempname, -> complete null, html
 
-		request(packet.href)
-			.pipe(fs.createWriteStream(tempname))
-			.on 'close', ->
-				if ext in ['.pdf']
-					packet.engine = 'calibre'
-					convert_calibre tempname, done_conversion
-				else if ext in ['.doc', '.docx']
-					packet.engine = 'unoconv'
-					convert_unoconv tempname, done_conversion
-				else if false
-					packet.engine = 'cloudconvert'
-					convert_cloud tempname, done_conversion
+	start_conversion = ->
+		if ext in ['.pdf'] and false
+			packet.engine = 'cloudconvert'
+			convert_cloud tempname, done_conversion
+		else if ext in ['.pdf']
+			packet.engine = 'calibre'
+			convert_calibre tempname, done_conversion
+		else if ext in ['.doc', '.docx', '.rtf', '.wpd']
+			packet.engine = 'unoconv'
+			convert_unoconv tempname, done_conversion
+		else if ext in ['.txt']
+			packet.engine = 'plaintext'
+			convert_plaintext tempname, done_conversion
+		
+		else
+			packet.error = 'unsupported document type'
+			packet.save ->
+				complete null
 
-process_packet()
+	if /^expand/.test(packet.href)
+		source = fs.createReadStream(packet.href)
+	else
+		source = request(packet.href)
 
-# inputfile = null
-# outputfile = "output.html"
-# convert options, inputfile, outputfile, (err, result) ->
-# 	return console.error(err)  if err
-# 	if result
-# 		console.log "Success: ", result
-# 	else
-# 		console.log "Success"
-# 	return
+	source
+		.pipe(fs.createWriteStream(tempname))
+		.on 'close', start_conversion
+
+
+# Packet.findOne { html: null, name: {$regex: /pdf/i} }, (err, packet) ->
+# process_packet()
+next_group = ->
+	Packet.find({ html: null, error: null }).limit(320).exec (err, packets) ->
+		async.eachLimit packets, 1, process_packet, (err) ->
+			console.log 'done with each (document) for 20', err
+			next_group()
+
+next_group()
+
+# next_group_unoconv = ->
+# 	Packet.find({ html: null, error: null, name: {$regex: /\.(doc|docx|rtf)$/i } }).limit(20).exec (err, packets) ->
+# 		async.eachLimit packets, 1, process_packet, (err) ->
+# 			console.log 'done with each (document) for 20', err
+# 			next_group_unoconv()
+
+# next_group_calibre = ->
+# 	Packet.find({ html: null, error: null, name: {$regex: /\.pdf$/i } }).limit(20).exec (err, packets) ->
+# 		async.eachLimit packets, 3, process_packet, (err) ->
+# 			console.log 'done with each (pdf) for 20', err
+# 			next_group_calibre()
+
+
+# next_group_unoconv()
+# next_group_calibre()
+
+
