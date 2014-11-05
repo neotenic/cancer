@@ -4,8 +4,12 @@ request = require 'request'
 async   = require 'async'
 unzip   = require 'unzip'
 libpath = require 'path'
-fs      = require 'fs'
+fs      = require 'fs.extra'
+cp      = require 'child_process'
 _       = require 'underscore'
+unoconv = require 'unoconv'
+
+config = (try JSON.parse(fs.readFileSync('config.json'))) || {}
 
 db = mongoose.createConnection 'localhost', 'cancer'
 db.on 'error', (err) -> console.log 'database error', err
@@ -36,6 +40,7 @@ Packet = db.model 'Packet', new mongoose.Schema {
 	href:             String,
 	name:             String,
 	html:             String,
+	engine:           String,
 	tournament:       mongoose.Schema.ObjectId
 }
 
@@ -148,7 +153,116 @@ sources = [
 # 			console.log 'done with exploring tournaments'
 
 
-console.log Packet.findOne()
+convert = (options, inputfile, callback) ->
+	apirequest = request.post({
+		url: "https://api.cloudconvert.org/convert"
+		followAllRedirects: true
+		qs: options
+	}, (error, response, body) ->
+		if response.statusCode is 200
+			callback(null, body)
+		else
+			callback new Error(JSON.parse(body).error)
+	)
+	apirequest.form().append "file", fs.createReadStream(inputfile)  if inputfile
 
 
-convert_packet()
+process_packet_cc = ->
+	key_index = 0
+	Packet.findOne { html: null }, (err, packet) ->
+		ext = libpath.extname(packet.name)
+		if /^expand/.test(packet.href)
+			throw 'walp expansions'
+
+
+
+		if ext == '.docx'
+			options.inputformat = 'docx'
+		else if ext == '.pdf'
+			options.inputformat = 'pdf'
+		else
+			throw 'oh shit unsupported format' + ext
+		
+		console.log packet.name, ext
+
+		convert options, null, (err, html) ->
+			return console.log 'error', err if err
+			packet.html = html
+			packet.engine = 'cloudconvert'
+			packet.save()
+			console.log 'done and saved', html
+			process_packet()
+
+convert_cloud = (tempname, cb) ->
+	key_index = 0
+	options =
+		apikey: config.cloudconvert[key_index]
+		input: "upload"
+		download: "inline"
+		outputformat: "html"
+		inputformat: libpath.extname(tempname).slice(1)
+		file: packet.href
+	convert options, tempname, cb
+
+convert_calibre = (tempname, cb) ->
+	outname  = "temp/output-calibre-#{temp_counter++}"
+	proc = cp.spawn('/Applications/calibre.app/Contents/MacOS/ebook-convert', [tempname, outname, '-vvvv'])
+	console.log [tempname, outname]
+	proc.on 'close', (code, signal) ->
+		console.log 'process is finished', code, signal
+		fs.readFile outname + "/index.html", 'utf8', (err, html) ->
+			fs.unlink 
+			cb err, html
+	proc.stdout.on 'data', (data) ->
+		console.log 'data', data.toString()
+	proc.stderr.on 'data', (data) ->
+		console.log 'stderr', data.toString()
+	console.log 'done with', tempname
+
+convert_unoconv = (tempname, cb) ->
+	unoconv.convert tempname, 'html', {
+		bin: 'unoconv/unoconv'
+	}, (err, data) ->
+		console.log 'converted!', data.toString()
+		cb null, data.toString()
+
+
+temp_counter = 0
+
+process_packet = ->
+	Packet.findOne { html: null, name: {$regex: /pdf/i} }, (err, packet) ->
+		console.log packet
+		ext = libpath.extname(packet.name)
+		if /^expand/.test(packet.href)
+			throw 'walp expansions'
+		tempname = "temp/input-#{temp_counter++}#{ext}"
+		done_conversion = (err, html) ->
+			# console.log html
+			packet.html = html
+			packet.save()
+			console.log 'done conversion, saved and whatevs'
+
+		request(packet.href)
+			.pipe(fs.createWriteStream(tempname))
+			.on 'close', ->
+				if ext in ['.pdf']
+					packet.engine = 'calibre'
+					convert_calibre tempname, done_conversion
+				else if ext in ['.doc', '.docx']
+					packet.engine = 'unoconv'
+					convert_unoconv tempname, done_conversion
+				else if false
+					packet.engine = 'cloudconvert'
+					convert_cloud tempname, done_conversion
+
+process_packet()
+
+# inputfile = null
+# outputfile = "output.html"
+# convert options, inputfile, outputfile, (err, result) ->
+# 	return console.error(err)  if err
+# 	if result
+# 		console.log "Success: ", result
+# 	else
+# 		console.log "Success"
+# 	return
